@@ -1,0 +1,9 @@
+node_modules/
+.env
+
+# Build output; rebuilt by `npm install` (root postinstall) on every deploy.
+dist/
+web/dist/
+
+# Hand-off archives of the project itself; never part of the repo.
+*.zip

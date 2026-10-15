@@ -1,0 +1,27 @@
+{
+  "name": "waiting-on-us",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared inbox: see which customer threads are waiting on us, claim one, answer it.",
+  "scripts": {
+    "build:web": "npm --prefix web install --no-audit --no-fund && npm --prefix web run build",
+    "build:server": "tsc -p tsconfig.server.json && cp server/schema.sql dist/server/schema.sql",
+    "build": "npm run build:web && npm run build:server",
+    "postinstall": "npm run build",
+    "start": "node dist/server/index.js",
+    "dev": "npm --prefix web run dev",
+    "test": "APP_SCHEMA=${APP_SCHEMA:-app_test} node --test --test-concurrency=1 \"lib/**/*.test.ts\" \"server/**/*.test.ts\""
+  },
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "typescript": "^7.0.2"
+  }
+}
