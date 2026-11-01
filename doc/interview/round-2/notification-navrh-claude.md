@@ -49,6 +49,33 @@ Client ─POST─► Notification API ─publish─► RabbitMQ exchange "notifi
 - **Izolácia kanálov:** keď sa zasekne SMS brána, email a push bežia ďalej.
 - **Publisher confirm:** 202 ide klientovi až po tom, čo broker potvrdí uloženie správy. Prijatá správa sa tak nestratí.
 
+### Čo je worker
+
+Worker je **samostatne nasadená, bezstavová služba v Spring Boot (Java/Kotlin)**. Nemá verejné API, iba endpointy pre health a metriky. Číta správy z brokera a posiela ich na bránu.
+
+Čo robí, napríklad SMS worker:
+
+1. Odoberá správy zo svojej fronty (alebo zo svojich partícií streamu).
+2. Doplní kontakt používateľa z cache (krok 3), teda telefónne číslo podľa `userId`.
+3. Zavolá SMS bránu. Pri chybe to skúša znova s čakaním (retry s backoffom) a dodržiava limity brány (rate limit, circuit breaker).
+4. Pošle stavovú udalosť `SENT` alebo `FAILED` pre audit (krok 5).
+5. Až potom potvrdí brokeru (ack), že správu spracoval.
+
+Prečo je oddelený od Notification API:
+
+- **API musí byť rýchle.** Iba prijme správu, zapíše ju do brokera a vráti `202`. Pomalú prácu robia workery, lebo brány odpovedajú 100+ ms.
+- **Nezávislé škálovanie.** API sa škáluje podľa počtu requestov, workery podľa toho, koľko správ čaká vo fronte (lag).
+- **Izolácia kanálov.** Keď sa zasekne SMS brána, zasekne sa iba SMS worker.
+
+Či sú to tri samostatné aplikácie:
+
+| Možnosť | Ako | Kedy |
+|---|---|---|
+| **A. Jeden kód, tri nasadenia** (odporúčam) | jeden Spring Boot projekt s konfiguráciou `channel=sms\|email\|push`, nasadený trikrát (v Kubernetes tri Deploymenty z jedného Docker image) | spoločný kód (retry, audit, cache, idempotencia) je raz, kanály sú aj tak oddelené |
+| **B. Tri samostatné projekty** | `sms-worker`, `email-worker`, `push-worker` | keď sa kanály veľmi líšia alebo ich vlastnia rôzne tímy |
+
+**Ako to povedať:** „Workery sú bezstavové Spring Boot consumery bez HTTP API. Jeden kód, nasadený zvlášť pre každý kanál, autoscaling podľa lagu fronty.“
+
 ## Krok 3 – dáta o používateľovi bez dotazu do DB
 
 ```
