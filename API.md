@@ -167,6 +167,30 @@ answered, and only while the customer has not written since — if they have, th
 thread is already waiting for everybody and must be claimed afresh. On success
 the thread is waiting again and still claimed by you.
 
+## Topics (branch `improvements_for_round_2`)
+
+A **topic** is one reply chain inside a customer thread (`in_reply_to`), plus
+messages a colleague moved into it by hand. "Answered" is recorded per topic;
+the thread leaves the waiting list when no topic is open. The rule lives in
+`lib/topics.ts`.
+
+- `GET /api/threads` lines also carry `topicCount`, `openTopicCount`,
+  `unansweredCount` and `waitingSince` (the oldest unanswered message). The
+  waiting list is sorted by `waitingSince`, oldest first, then by
+  `unansweredCount`, highest first.
+- `GET /api/threads/:threadId` also returns `topics` and, per message,
+  `assignedTo` (the topic it was moved into by hand, or `null`).
+- `POST /api/threads/:threadId/topics/:topicId/answered` — body
+  `{ person, seenMessageId }`. Only the claim holder; refused (409) if the
+  topic's newest message is not `seenMessageId`.
+- `POST /api/threads/:threadId/topics/:topicId/reopen` — body `{ person }`.
+  Undo your own topic answer while the thread is yours.
+- `POST /api/threads/:threadId/messages/:messageId/topic` — body
+  `{ person, topicId }`, `topicId: null` moves it back. Only messages without
+  a reply link, only by the claim holder.
+- `POST /api/threads/:threadId/answered` now also answers every open topic;
+  `/reopen` takes those topic answers back.
+
 ## Errors
 
 | Status | Body | When |

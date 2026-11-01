@@ -56,9 +56,11 @@ export function createApp(): Express {
   })
 
   app.use(express.static(WEB_DIST, { index: false }))
-  // Client-side routing: every other GET renders the SPA.
+  // Client-side routing: every other GET renders the SPA. `root` matters:
+  // without it `send` refuses the whole absolute path when any folder in it
+  // starts with a dot (a checkout under ~/.something answered every page 404).
   app.get(/.*/, (_req, res) => {
-    res.sendFile(path.join(WEB_DIST, 'index.html'))
+    res.sendFile('index.html', { root: WEB_DIST })
   })
 
   // Customer text and names must never reach a log or a response body, so the

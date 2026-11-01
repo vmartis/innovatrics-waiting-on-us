@@ -4,7 +4,6 @@ import { asThreadId, findThread } from '../threadLookup.ts'
 import { toTimeline, type TimelineRow } from '../../lib/thread.ts'
 import { toThreadSummaries, type RequestRow } from '../../lib/threads.ts'
 import {
-  assignmentMap,
   topicWork,
   workByThread,
   type TopicAnswerRow,
@@ -37,10 +36,10 @@ threadsRouter.get('/', async (req, res) => {
     ),
     pool.query<ClaimRow>(`SELECT ${CLAIM_COLUMNS} FROM thread_claims`),
     pool.query<TopicAnswerRow>(`SELECT ${TOPIC_ANSWER_COLUMNS} FROM topic_answers`),
-    pool.query<TopicAssignmentRow>(`SELECT message_id, topic_id FROM message_topics`),
+    pool.query<TopicAssignmentRow>(`SELECT message_id, topic_id, assigned_at FROM message_topics`),
   ])
 
-  const work = workByThread(messages.rows, answers.rows, assignmentMap(moves.rows))
+  const work = workByThread(messages.rows, answers.rows, moves.rows)
   const all = withState(toThreadSummaries(messages.rows), claims.rows, work)
   res.json({ view, threads: forView(all, view) })
 })

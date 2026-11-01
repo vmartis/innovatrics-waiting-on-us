@@ -1,4 +1,5 @@
-import { CornerDownRight } from 'lucide-react'
+import { CornerDownRight, Shuffle } from 'lucide-react'
+import type { ReactNode } from 'react'
 import { ChannelBadge } from '@/components/ChannelBadge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { Message } from '@/lib/api'
@@ -18,6 +19,9 @@ type Row = {
   /** The message it answers, when that message is shown further down. */
   answers: Message | null
 }
+
+/** Extra controls for one message, e.g. moving it into another topic. */
+type Actions = (message: Message) => ReactNode
 
 /**
  * Work out the indent and the "answers …" line for each message.
@@ -42,16 +46,30 @@ function toRows(messages: Message[]): Row[] {
 
     const parent = message.answersId === null ? null : byId.get(message.answersId) ?? null
     const parentAt = parent ? positionOf.get(parent.id) : undefined
-    const answers = parent && parentAt !== undefined && parentAt > index ? parent : null
+    // A message moved by hand does not answer anything; it says so itself.
+    const answers =
+      message.assignedTo === null && parent && parentAt !== undefined && parentAt > index
+        ? parent
+        : null
     return { message, depth, answers }
   })
 }
 
 /**
- * One customer's whole conversation: email, chat and call in a single
- * timeline, newest message at the top.
+ * One customer's whole conversation — or one topic of it: email, chat and
+ * call in a single timeline, newest message at the top.
  */
-export function MessageList({ messages }: { messages: Message[] }) {
+export function MessageList({
+  messages,
+  actions,
+  label = 'Conversation, newest message first',
+  showCount = true,
+}: {
+  messages: Message[]
+  actions?: Actions
+  label?: string
+  showCount?: boolean
+}) {
   if (messages.length === 0) {
     return (
       <Card>
@@ -63,20 +81,28 @@ export function MessageList({ messages }: { messages: Message[] }) {
   }
 
   return (
-    <section className="space-y-3" aria-label="Conversation, newest message first">
-      <p className="text-xs text-muted-foreground">
-        Newest message first · {messages.length} messages
-      </p>
+    <section className="space-y-3" aria-label={label}>
+      {showCount ? (
+        <p className="text-xs text-muted-foreground">
+          Newest message first · {messages.length} messages
+        </p>
+      ) : null}
       {toRows(messages).map((row) => (
         <div key={row.message.id} className={INDENT[row.depth]}>
-          <MessageCard row={row} />
+          <MessageCard row={row} actions={actions} />
         </div>
       ))}
     </section>
   )
 }
 
-function MessageCard({ row: { message, answers } }: { row: Row }) {
+function MessageCard({
+  row: { message, answers },
+  actions,
+}: {
+  row: Row
+  actions?: Actions
+}) {
   return (
     <Card>
       <CardHeader className="gap-2">
@@ -88,6 +114,7 @@ function MessageCard({ row: { message, answers } }: { row: Row }) {
           <span className="text-xs text-muted-foreground">
             {dateTime.format(new Date(message.receivedAt))}
           </span>
+          {actions ? <div className="ml-auto">{actions(message)}</div> : null}
         </div>
         {message.subject ? (
           <CardTitle className="text-base font-medium">{message.subject}</CardTitle>
@@ -99,6 +126,12 @@ function MessageCard({ row: { message, answers } }: { row: Row }) {
             <CornerDownRight className="size-3 shrink-0" aria-hidden="true" />
             Answers {answers.contactName ?? 'the message'} of{' '}
             {dateTime.format(new Date(answers.receivedAt))}, below
+          </p>
+        ) : null}
+        {message.assignedTo !== null ? (
+          <p className="flex items-center gap-1 text-xs text-muted-foreground">
+            <Shuffle className="size-3 shrink-0" aria-hidden="true" />
+            Moved into this topic by a colleague — the customer did not link it
           </p>
         ) : null}
       </CardHeader>

@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  assignmentMap,
   toTopics,
   topicWork,
   workByThread,
@@ -14,6 +13,14 @@ function msg(id: number, day: number, inReplyTo: number | null = null): TopicMes
     id,
     received_at: new Date(`2026-10-${String(day).padStart(2, '0')}T10:00:00.000Z`),
     in_reply_to: inReplyTo,
+  }
+}
+
+function move(messageId: number, topicId: number, day = 21) {
+  return {
+    message_id: messageId,
+    topic_id: topicId,
+    assigned_at: new Date(`2026-10-${day}T12:00:00.000Z`),
   }
 }
 
@@ -76,23 +83,19 @@ test('a message without a link starts its own topic until it is moved by hand', 
   const rows = [...TWO_TOPICS, msg(5, 8)]
   assert.equal(toTopics(rows, []).length, 3)
 
-  const moved = toTopics(rows, [], assignmentMap([{ message_id: 5, topic_id: 2 }]))
+  const moved = toTopics(rows, [], [move(5, 2)])
   assert.equal(moved.length, 2)
   assert.deepEqual(moved.find((t) => t.topicId === 2)?.messageIds, [5, 4, 2])
 })
 
 test('the customer own reply link always wins over a hand-made move', () => {
-  const topics = toTopics(TWO_TOPICS, [], assignmentMap([{ message_id: 3, topic_id: 2 }]))
+  const topics = toTopics(TWO_TOPICS, [], [move(3, 2)])
   assert.deepEqual(topics.find((t) => t.topicId === 1)?.messageIds, [3, 1])
 })
 
 test('moves that point outside the customer or into a loop are ignored, nothing is lost', () => {
   const rows = [msg(1, 1), msg(2, 2)]
-  const loop = assignmentMap([
-    { message_id: 1, topic_id: 2 },
-    { message_id: 2, topic_id: 1 },
-    { message_id: 1, topic_id: 999 },
-  ])
+  const loop = [move(1, 2), move(2, 1), move(1, 999)]
   const topics = toTopics(rows, [], loop)
 
   const all = topics.flatMap((t) => t.messageIds).sort()
@@ -128,4 +131,19 @@ test('every customer gets its own numbers, keyed by the first message id', () =>
   assert.equal(work.get(10)?.openTopicCount, 0)
   assert.equal(work.get(12)?.openTopicCount, 1)
   assert.equal(work.size, 2)
+})
+
+test('a message moved into an answered topic stays unanswered until the topic is answered again', () => {
+  // The outage (2 → 4) was answered on 20 October. Message 3 is older than
+  // that answer but was moved in on 21 October: nobody has answered it yet.
+  const rows = [msg(1, 1), msg(2, 2), msg(3, 3), msg(4, 4, 2)]
+  const outage = toTopics(rows, [answer(2, 4)], [move(3, 2, 21)]).find((t) => t.topicId === 2)
+
+  assert.equal(outage?.status, 'open')
+  assert.equal(outage?.unansweredCount, 1)
+  assert.equal(outage?.waitingSince, '2026-10-03T10:00:00.000Z')
+
+  // Moved before the answer: the answer already covered it.
+  const before = toTopics(rows, [answer(2, 4)], [move(3, 2, 19)]).find((t) => t.topicId === 2)
+  assert.equal(before?.status, 'answered')
 })

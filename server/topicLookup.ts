@@ -44,13 +44,12 @@ export async function loadTopics(
     [thread.threadId],
   )
   const moves = await client.query<TopicAssignmentRow>(
-    `SELECT message_id, topic_id FROM message_topics WHERE thread_id = $1`,
+    `SELECT message_id, topic_id, assigned_at FROM message_topics WHERE thread_id = $1`,
     [thread.threadId],
   )
-  const assigned = assignmentMap(moves.rows)
   return {
     rows: messages.rows,
-    assigned,
-    topics: toTopics(messages.rows, answers.rows, assigned),
+    assigned: assignmentMap(moves.rows),
+    topics: toTopics(messages.rows, answers.rows, moves.rows),
   }
 }

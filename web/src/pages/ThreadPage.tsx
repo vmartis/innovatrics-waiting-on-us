@@ -6,6 +6,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { MessageList } from '@/components/MessageList'
 import { RefreshFailed } from '@/components/RefreshFailed'
 import { StatusBadge } from '@/components/StatusBadge'
+import { TopicList } from '@/components/TopicList'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -114,7 +115,7 @@ export function ThreadPage({ me }: { me: string | null }) {
     )
   }
 
-  const { thread: head, messages } = thread.data
+  const { thread: head, messages, topics } = thread.data
   const mine = head.status === 'claimed' && head.claimedBy === me
   const iAnswered = head.status === 'answered' && head.answeredBy === me
   const busy = claim.isPending || answer.isPending || release.isPending || reopen.isPending
@@ -137,8 +138,8 @@ export function ThreadPage({ me }: { me: string | null }) {
               <CardTitle className="text-xl">{head.customer}</CardTitle>
               <CardDescription>
                 {head.contactName ? `${head.contactName} · ` : ''}
-                {head.messageCount} messages · last one{' '}
-                {dateTime.format(new Date(head.lastMessageAt))}
+                {head.messageCount} messages · {head.openTopicCount} of {head.topicCount} topics
+                open · last one {dateTime.format(new Date(head.lastMessageAt))}
               </CardDescription>
             </div>
             <StatusBadge status={head.status} claimedBy={head.claimedBy} />
@@ -174,8 +175,8 @@ export function ThreadPage({ me }: { me: string | null }) {
                 Hand it back
               </Button>
               <p className="text-sm text-muted-foreground">
-                This one is yours — mark it answered once you have replied, or hand it back if you
-                cannot finish it.
+                This one is yours — mark each topic answered below as you reply, or all at once.
+                Hand it back if you cannot finish it.
               </p>
             </>
           ) : head.status === 'claimed' ? (
@@ -197,16 +198,21 @@ export function ThreadPage({ me }: { me: string | null }) {
 
       {/* A single odd message must cost you the conversation, not the app. */}
       <ErrorBoundary where="conversation">
-        <MessageList messages={messages} />
+        {topics.length > 0 ? (
+          <TopicList head={head} messages={messages} topics={topics} me={me} />
+        ) : (
+          <MessageList messages={messages} />
+        )}
       </ErrorBoundary>
     </div>
   )
 }
 
 /**
- * Marking a thread answered takes it off the waiting list for everyone, so it
- * asks first instead of acting on one stray click. You can undo your own mark
- * afterwards; a colleague cannot undo it for you.
+ * Marking the whole thread answered closes every open topic at once and takes
+ * it off the waiting list for everyone, so it asks first instead of acting on
+ * one stray click. You can undo your own mark afterwards; a colleague cannot
+ * undo it for you.
  */
 function ConfirmAnswered({
   customer,
@@ -221,14 +227,14 @@ function ConfirmAnswered({
     <AlertDialog>
       <AlertDialogTrigger render={<Button disabled={busy} />}>
         <Check className="size-4" aria-hidden="true" />
-        Mark answered
+        Mark all answered
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Have you replied to {customer}?</AlertDialogTitle>
+          <AlertDialogTitle>Have you replied to everything {customer} asked?</AlertDialogTitle>
           <AlertDialogDescription>
-            This takes the thread off the waiting list for the whole team. You can undo it
-            yourself afterwards — a colleague cannot.
+            This marks every open topic answered and takes the thread off the waiting list for
+            the whole team. You can undo it yourself afterwards — a colleague cannot.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

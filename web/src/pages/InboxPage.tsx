@@ -4,6 +4,7 @@ import { useState, type MouseEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { ChannelBadge } from '@/components/ChannelBadge'
+import { Badge } from '@/components/ui/badge'
 import { RefreshFailed } from '@/components/RefreshFailed'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Button } from '@/components/ui/button'
@@ -27,7 +28,7 @@ import {
 } from '@/lib/api'
 import { filterBySearch } from '@shared/search.ts'
 import { isLongWait, waitedFor } from '@shared/elapsed.ts'
-import { onlyMine } from '@shared/waiting.ts'
+import { onlyMine, waitingSince } from '@shared/waiting.ts'
 
 const dateTime = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
@@ -288,7 +289,7 @@ function ThreadTable({
           <TableHead>Customer</TableHead>
           <TableHead>{answered ? 'Answered by' : 'Status'}</TableHead>
           <TableHead>Channels</TableHead>
-          <TableHead className="text-right">Messages</TableHead>
+          <TableHead className="text-right">{answered ? 'Messages' : 'Open topics'}</TableHead>
           <TableHead>{answered ? 'Answered' : 'Waiting'}</TableHead>
           {answered ? null : (
             <TableHead className="text-right">
@@ -329,14 +330,26 @@ function ThreadTable({
                 ))}
               </div>
             </TableCell>
-            <TableCell className="text-right tabular-nums">{thread.messageCount}</TableCell>
+            <TableCell className="text-right tabular-nums">
+              {answered ? (
+                thread.messageCount
+              ) : (
+                <span title="Topics are reply chains; each one is answered on its own">
+                  {thread.openTopicCount}
+                  <span className="text-muted-foreground"> of {thread.topicCount}</span>
+                </span>
+              )}
+            </TableCell>
             <TableCell>
               {answered ? (
                 <span className="text-muted-foreground">
                   {dateTime.format(new Date(thread.answeredAt ?? thread.lastMessageAt))}
                 </span>
               ) : (
-                <WaitedFor since={thread.lastMessageAt} />
+                <div className="flex flex-wrap items-center gap-2">
+                  <WaitedFor since={waitingSince(thread)} />
+                  <Unanswered count={thread.unansweredCount} />
+                </div>
               )}
             </TableCell>
             {answered ? null : (
@@ -370,8 +383,10 @@ function ThreadTable({
 }
 
 /**
- * How long this customer has been waiting. The exact time is still there on
- * hover, but "9 days" is what tells you whether to pick this one up.
+ * How long this customer has been waiting, counted from their oldest message
+ * nobody has answered — a "Any update?" this morning must not make a five-day
+ * wait look two hours old. The exact time is still there on hover, but
+ * "9 days" is what tells you whether to pick this one up.
  */
 function WaitedFor({ since }: { since: string }) {
   const now = new Date()
@@ -379,10 +394,27 @@ function WaitedFor({ since }: { since: string }) {
   return (
     <span
       className={overdue ? 'font-medium text-destructive' : 'text-muted-foreground'}
-      title={dateTime.format(new Date(since))}
+      title={`Oldest unanswered message: ${dateTime.format(new Date(since))}`}
     >
       {waitedFor(since, now)}
     </span>
+  )
+}
+
+/**
+ * How many messages nobody has answered yet. One is normal; more means the
+ * customer is chasing us, which is worth seeing before you open the thread.
+ */
+function Unanswered({ count }: { count: number }) {
+  if (count < 2) return null
+  return (
+    <Badge
+      variant="outline"
+      className="tabular-nums"
+      title={`${count} messages since our last answer`}
+    >
+      {count} unanswered
+    </Badge>
   )
 }
 

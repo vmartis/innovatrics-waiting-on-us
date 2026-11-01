@@ -18,6 +18,13 @@ export type ThreadSummary = ThreadState & {
   lastMessageAt: string
   lastChannel: string
   latestMessageId: number
+  /** How many topics (reply chains) this customer has, and how many are open. */
+  topicCount: number
+  openTopicCount: number
+  /** Messages nobody has answered yet — 3 means the customer is chasing. */
+  unansweredCount: number
+  /** Arrival of the oldest unanswered message; what the wait is measured from. */
+  waitingSince: string | null
 }
 
 export type Message = {
@@ -34,9 +41,26 @@ export type Message = {
    * link was unusable. Screens must follow this one.
    */
   answersId: number | null
+  /** The topic a colleague moved this message into by hand, or `null`. */
+  assignedTo: number | null
 }
 
-export type ThreadDetail = { thread: ThreadSummary; messages: Message[] }
+/** One topic of a customer: a reply chain, answered on its own. */
+export type Topic = {
+  /** `requests.id` of the topic's first message. */
+  topicId: number
+  /** Its messages, newest first. */
+  messageIds: number[]
+  newestMessageId: number
+  lastMessageAt: string
+  status: 'open' | 'answered'
+  answeredBy: string | null
+  answeredAt: string | null
+  unansweredCount: number
+  waitingSince: string | null
+}
+
+export type ThreadDetail = { thread: ThreadSummary; messages: Message[]; topics: Topic[] }
 
 /** An error carrying the server's own wording, so screens can show it. */
 export class ApiError extends Error {
@@ -113,5 +137,51 @@ export async function reopenThread(threadId: number, person: string): Promise<Th
     method: 'POST',
     body: JSON.stringify({ person }),
   })
+  return data.state
+}
+
+/**
+ * Mark one topic answered. `seenMessageId` is the newest message of the topic
+ * on your screen; if the customer wrote again since, the server refuses.
+ */
+export async function answerTopic(
+  threadId: number,
+  topic: Topic,
+  person: string,
+): Promise<ThreadState> {
+  const data = await request<{ state: ThreadState }>(
+    `/api/threads/${threadId}/topics/${topic.topicId}/answered`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ person, seenMessageId: topic.newestMessageId }),
+    },
+  )
+  return data.state
+}
+
+/** Undo your own answer on one topic. */
+export async function reopenTopic(
+  threadId: number,
+  topicId: number,
+  person: string,
+): Promise<ThreadState> {
+  const data = await request<{ state: ThreadState }>(
+    `/api/threads/${threadId}/topics/${topicId}/reopen`,
+    { method: 'POST', body: JSON.stringify({ person }) },
+  )
+  return data.state
+}
+
+/** Move a message without a reply link into a topic, or back on its own (`null`). */
+export async function moveMessage(
+  threadId: number,
+  messageId: number,
+  topicId: number | null,
+  person: string,
+): Promise<ThreadState> {
+  const data = await request<{ state: ThreadState }>(
+    `/api/threads/${threadId}/messages/${messageId}/topic`,
+    { method: 'POST', body: JSON.stringify({ person, topicId }) },
+  )
   return data.state
 }

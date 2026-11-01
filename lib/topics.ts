@@ -15,7 +15,9 @@
  *
  * A topic is answered when its answer covers its newest message. When the
  * customer writes in it again, it is open again, and only the new messages
- * count as unanswered. Like the rest of the app, "newer" between two messages
+ * count as unanswered. A message moved into a topic by hand counts as
+ * unanswered until the topic is answered *after* the move — otherwise moving
+ * an open request into an answered topic would quietly hide it. Like the rest of the app, "newer" between two messages
  * of one customer means a higher `requests.id`.
  */
 import { parentLinks } from './thread.ts'
@@ -39,6 +41,7 @@ export type TopicAnswerRow = {
 export type TopicAssignmentRow = {
   message_id: number
   topic_id: number
+  assigned_at: Date
 }
 
 export type Topic = {
@@ -97,8 +100,10 @@ export function assignmentMap(rows: readonly TopicAssignmentRow[]): Map<number, 
 export function toTopics(
   rows: readonly TopicMessageRow[],
   answers: readonly TopicAnswerRow[],
-  assigned: ReadonlyMap<number, number> = new Map(),
+  moves: readonly TopicAssignmentRow[] = [],
 ): Topic[] {
+  const assigned = assignmentMap(moves)
+  const movedAt = new Map(moves.map((move) => [move.message_id, new Date(move.assigned_at)]))
   const items: Item[] = rows.map((row) => ({
     id: row.id,
     inReplyTo: row.in_reply_to,
@@ -127,7 +132,12 @@ export function toTopics(
     group.sort((a, b) => (isNewer(a, b) ? -1 : 1))
     const newest = group[0]
     const answer = answerOf.get(topicId)
-    const unanswered = answer ? group.filter((m) => m.id > answer.latest_message_id) : group
+    const covered = (m: Item): boolean => {
+      if (!answer || m.id > answer.latest_message_id) return false
+      const moved = movedAt.get(m.id)
+      return !moved || moved <= new Date(answer.answered_at)
+    }
+    const unanswered = group.filter((m) => !covered(m))
     topics.push({
       topicId,
       messageIds: group.map((m) => m.id),
@@ -175,7 +185,7 @@ export function topicWork(topics: readonly Topic[]): TopicWork {
 export function workByThread(
   rows: readonly (TopicMessageRow & { customer: string })[],
   answers: readonly TopicAnswerRow[],
-  assigned: ReadonlyMap<number, number> = new Map(),
+  moves: readonly TopicAssignmentRow[] = [],
 ): Map<number, TopicWork> {
   const byCustomer = new Map<string, (TopicMessageRow & { customer: string })[]>()
   for (const row of rows) {
@@ -187,7 +197,7 @@ export function workByThread(
   const work = new Map<number, TopicWork>()
   for (const group of byCustomer.values()) {
     const threadId = Math.min(...group.map((row) => row.id))
-    work.set(threadId, topicWork(toTopics(group, answers, assigned)))
+    work.set(threadId, topicWork(toTopics(group, answers, moves)))
   }
   return work
 }

@@ -326,3 +326,21 @@ test('topic changes never write to the sample data', async () => {
 
   assert.equal(await count(), before)
 })
+
+test('moving an open message into an answered topic opens that topic, never hides it', async () => {
+  const threadId = await busyThreadId()
+  const { topics } = await claimed(threadId)
+  const target = topics[0]
+  const loose = topics.find((t) => t.messageIds.length === 1 && t.topicId !== target.topicId)
+  assert.ok(loose)
+  await answerTopic(threadId, target)
+
+  const moved = await post(`/api/threads/${threadId}/messages/${loose.topicId}/topic`, {
+    person: ALEX,
+    topicId: target.topicId,
+  })
+  assert.equal(moved.status, 200)
+  const after = moved.body.topics?.find((t) => t.topicId === target.topicId)
+  assert.equal(after?.status, 'open')
+  assert.equal(after?.unansweredCount, 1, 'only the moved message is waiting')
+})
