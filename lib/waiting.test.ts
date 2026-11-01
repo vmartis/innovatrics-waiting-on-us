@@ -6,10 +6,12 @@ import {
   onlyMine,
   isWaitingOnUs,
   threadState,
+  waitingSince,
   withState,
   type ClaimRow,
 } from './waiting.ts'
 import type { ThreadSummary } from './threads.ts'
+import type { TopicWork } from './topics.ts'
 
 function claim(partial: Partial<ClaimRow> = {}): ClaimRow {
   return {
@@ -337,4 +339,61 @@ test('with no name picked, my pile is empty rather than everybody else work', ()
 
   assert.deepEqual(onlyMine(items, null), [])
   assert.deepEqual(onlyMine(items, ''), [])
+})
+
+function work(partial: Partial<TopicWork> = {}): TopicWork {
+  return { topicCount: 1, openTopicCount: 1, unansweredCount: 1, waitingSince: null, ...partial }
+}
+
+test('a customer who chases this morning keeps the place of their oldest unanswered message', () => {
+  // Chaser waited since 1 October and wrote "Any update?" today; Calm wrote
+  // once, on 10 October. Sorting by the newest message put Chaser last.
+  const items = withState(
+    [
+      summary({ threadId: 1, customer: 'Chaser', lastMessageAt: '2026-10-15T08:00:00.000Z' }),
+      summary({ threadId: 2, customer: 'Calm', lastMessageAt: '2026-10-10T10:00:00.000Z' }),
+    ],
+    [],
+    new Map([
+      [1, work({ waitingSince: '2026-10-01T10:00:00.000Z', unansweredCount: 3 })],
+      [2, work({ waitingSince: '2026-10-10T10:00:00.000Z' })],
+    ]),
+  )
+
+  assert.deepEqual(
+    forView(items, 'waiting').map((i) => [i.customer, i.unansweredCount]),
+    [
+      ['Chaser', 3],
+      ['Calm', 1],
+    ],
+  )
+})
+
+test('between two equally long waits, the customer who chased more often comes first', () => {
+  const since = '2026-10-05T10:00:00.000Z'
+  const items = withState(
+    [summary({ threadId: 1, customer: 'Once' }), summary({ threadId: 2, customer: 'Thrice' })],
+    [],
+    new Map([
+      [1, work({ waitingSince: since, unansweredCount: 1 })],
+      [2, work({ waitingSince: since, unansweredCount: 3 })],
+    ]),
+  )
+
+  assert.deepEqual(
+    forView(items, 'waiting').map((i) => i.customer),
+    ['Thrice', 'Once'],
+  )
+})
+
+test('the wait is measured from the oldest unanswered message, the newest only as a fallback', () => {
+  const [withWork, without] = withState(
+    [summary({ threadId: 1 }), summary({ threadId: 2 })],
+    [],
+    new Map([[1, work({ waitingSince: '2026-10-01T10:00:00.000Z' })]]),
+  )
+
+  assert.equal(waitingSince(withWork), '2026-10-01T10:00:00.000Z')
+  assert.equal(waitingSince(without), without.lastMessageAt)
+  assert.equal(without.unansweredCount, 0, 'a thread with no topic numbers gets zeros')
 })

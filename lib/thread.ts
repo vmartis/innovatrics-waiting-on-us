@@ -59,7 +59,16 @@ export type TimelineMessage = {
    * message answers something that is not below it.
    */
   answersId: number | null
+  /**
+   * `requests.id` of the topic a colleague moved this message into by hand,
+   * or `null`. Only messages without their own reply link can be moved, so
+   * this and `inReplyTo` are never both set.
+   */
+  assignedTo: number | null
 }
+
+/** What a reply link is worked out from: the message and what it answers. */
+export type Linkable = { id: number; inReplyTo: number | null }
 
 /** Newer is a later time, or the same time and a higher id. */
 function isNewer(a: TimelineMessage, b: TimelineMessage): boolean {
@@ -76,22 +85,31 @@ function toMessage(row: TimelineRow): TimelineMessage {
     body: row.body,
     inReplyTo: row.in_reply_to,
     answersId: null,
+    assignedTo: null,
   }
 }
 
 /**
  * Which message each message answers, counting only links we can follow.
  *
+ * `assigned` holds the topics colleagues picked by hand (message id → topic
+ * id). It only counts for a message that has no reply link of its own: the
+ * customer's own link always wins over our guess.
+ *
  * A link is dropped when it points at a message that is not in this thread, at
  * the message itself, or back into a loop — the row is then its own chain, so
  * a strange link can hide nothing and cannot make the walk below spin.
  */
-function parentLinks(messages: readonly TimelineMessage[]): Map<number, number> {
+export function parentLinks(
+  messages: readonly Linkable[],
+  assigned: ReadonlyMap<number, number> = new Map(),
+): Map<number, number> {
   const byId = new Map(messages.map((m) => [m.id, m]))
   const parentOf = new Map<number, number>()
 
   for (const message of messages) {
-    const parent = message.inReplyTo === null ? undefined : byId.get(message.inReplyTo)
+    const link = message.inReplyTo ?? assigned.get(message.id) ?? null
+    const parent = link === null ? undefined : byId.get(link)
     if (parent && parent.id !== message.id) parentOf.set(message.id, parent.id)
   }
 
@@ -110,17 +128,28 @@ function parentLinks(messages: readonly TimelineMessage[]): Map<number, number> 
 
 /**
  * Put one customer's messages in reading order: newest first, replies kept
- * with the message they answer (see the rule at the top of this file).
+ * with the message they answer (see the rule at the top of this file). A
+ * message a colleague moved into a topic by hand counts as a reply to that
+ * topic's first message, so it stands in the same block.
  *
  * The result never depends on the order the rows arrive in, so it cannot drift
  * when Postgres returns an unsorted scan — with one exception: if two messages
  * answered each other, the loop is broken at whichever of them is read first.
  * No message is ever lost or shown twice, and the walk cannot spin.
  */
-export function toTimeline(rows: readonly TimelineRow[]): TimelineMessage[] {
+export function toTimeline(
+  rows: readonly TimelineRow[],
+  assigned: ReadonlyMap<number, number> = new Map(),
+): TimelineMessage[] {
   const messages = rows.map(toMessage)
-  const parentOf = parentLinks(messages)
-  for (const message of messages) message.answersId = parentOf.get(message.id) ?? null
+  const parentOf = parentLinks(messages, assigned)
+  for (const message of messages) {
+    message.answersId = parentOf.get(message.id) ?? null
+    // Only claim a hand-made move when the timeline really used it.
+    if (message.inReplyTo === null && message.answersId !== null) {
+      message.assignedTo = message.answersId
+    }
+  }
 
   const children = new Map<number, TimelineMessage[]>()
   const roots: TimelineMessage[] = []

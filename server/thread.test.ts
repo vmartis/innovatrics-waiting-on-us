@@ -88,6 +88,7 @@ test('a message carries exactly the fields the thread screen needs', async () =>
 
   assert.deepEqual(Object.keys(body.messages[0]).sort(), [
     'answersId',
+    'assignedTo',
     'body',
     'channel',
     'contactName',

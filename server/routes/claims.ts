@@ -1,7 +1,9 @@
 import { Router, type Request, type Response } from 'express'
+import type { QueryResult } from 'pg'
 import { currentPerson } from '../currentPerson.ts'
 import { pool } from '../db.ts'
 import { asThreadId, findThread } from '../threadLookup.ts'
+import { loadTopics } from '../topicLookup.ts'
 import { threadState, type ClaimRow } from '../../lib/waiting.ts'
 
 export const claimsRouter: Router = Router()
@@ -88,16 +90,49 @@ claimsRouter.post('/:threadId/answered', async (req, res) => {
     return
   }
 
-  const answered = await pool.query<ClaimRow>(
-    `UPDATE thread_claims
-        SET answered_by = $3, answered_at = now()
-      WHERE thread_id = $1
-        AND latest_message_id = $2
-        AND claimed_by = $3
-        AND answered_by IS NULL
-      RETURNING ${CLAIM_COLUMNS}`,
-    [thread.threadId, thread.latestMessageId, person],
-  )
+  // One transaction: the thread mark and the answer for every open topic it
+  // closes go in together, with the same `now()`, so undoing the thread can
+  // find exactly the topic answers it has to take back.
+  const client = await pool.connect()
+  let answered: QueryResult<ClaimRow>
+  try {
+    await client.query('BEGIN')
+    answered = await client.query<ClaimRow>(
+      `UPDATE thread_claims
+          SET answered_by = $3, answered_at = now()
+        WHERE thread_id = $1
+          AND latest_message_id = $2
+          AND claimed_by = $3
+          AND answered_by IS NULL
+        RETURNING ${CLAIM_COLUMNS}`,
+      [thread.threadId, thread.latestMessageId, person],
+    )
+    if (answered.rowCount !== 0) {
+      const open = (await loadTopics(thread, client)).topics.filter((t) => t.status === 'open')
+      await client.query(
+        `INSERT INTO topic_answers (topic_id, thread_id, latest_message_id, answered_by, answered_at)
+              SELECT topic_id, $1, latest, $2, now()
+                FROM unnest($3::integer[], $4::integer[]) AS t(topic_id, latest)
+         ON CONFLICT (topic_id) DO UPDATE
+                 SET thread_id         = EXCLUDED.thread_id,
+                     latest_message_id = EXCLUDED.latest_message_id,
+                     answered_by       = EXCLUDED.answered_by,
+                     answered_at       = EXCLUDED.answered_at`,
+        [
+          thread.threadId,
+          person,
+          open.map((t) => t.topicId),
+          open.map((t) => t.newestMessageId),
+        ],
+      )
+    }
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
 
   if (answered.rowCount === 0) {
     const current = await readClaim(thread.threadId)
@@ -150,12 +185,27 @@ claimsRouter.post('/:threadId/reopen', async (req, res) => {
     // `latest_message_id = $3` matters: if the customer has written since, the
     // thread is already waiting for everyone, and undoing a spent answer must
     // not quietly turn it back into one person's claim.
-    sql: `UPDATE thread_claims
-             SET answered_by = NULL, answered_at = NULL
-           WHERE thread_id = $1
-             AND answered_by = $2
-             AND latest_message_id = $3
-       RETURNING ${CLAIM_COLUMNS}`,
+    //
+    // The topic answers written in the same moment as the thread mark (same
+    // `answered_at`) are taken back too, so the topics that closed the thread
+    // are open again. Every sub-statement sees the row as it was before, so
+    // `was.answered_at` is the old time even though the update clears it.
+    sql: `WITH was AS (
+            SELECT answered_at FROM thread_claims WHERE thread_id = $1
+          ), undone AS (
+            UPDATE thread_claims
+               SET answered_by = NULL, answered_at = NULL
+             WHERE thread_id = $1
+               AND answered_by = $2
+               AND latest_message_id = $3
+         RETURNING ${CLAIM_COLUMNS}
+          ), taken_back AS (
+            DELETE FROM topic_answers
+             WHERE thread_id = $1
+               AND answered_at = (SELECT answered_at FROM was)
+               AND EXISTS (SELECT 1 FROM undone)
+          )
+          SELECT ${CLAIM_COLUMNS} FROM undone`,
     values: (threadId, person, latestMessageId) => [threadId, person, latestMessageId],
     refused: 'only the person who answered this thread can undo it',
   })

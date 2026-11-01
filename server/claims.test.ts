@@ -22,14 +22,14 @@ const base = `http://127.0.0.1:${port}`
 const [ALEX, PRIYA] = TEAM
 
 after(async () => {
-  await pool.query('DELETE FROM thread_claims')
+  await pool.query('DELETE FROM thread_claims; DELETE FROM topic_answers; DELETE FROM message_topics')
   server.close()
   await pool.end()
 })
 
-// Our own table only; the sample table `requests` is never written to.
+// Our own tables only; the sample table `requests` is never written to.
 beforeEach(async () => {
-  await pool.query('DELETE FROM thread_claims')
+  await pool.query('DELETE FROM thread_claims; DELETE FROM topic_answers; DELETE FROM message_topics')
 })
 
 type Answer = { status: number; body: { error?: string; state?: ThreadState } }

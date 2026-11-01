@@ -53,16 +53,20 @@ test('GET /api/threads returns the real customers from Postgres', async () => {
     'lastMessageAt',
     'latestMessageId',
     'messageCount',
+    'openTopicCount',
     'status',
     'threadId',
+    'topicCount',
+    'unansweredCount',
+    'waitingSince',
   ])
   assert.equal(typeof first.customer, 'string')
   assert.ok((first.messageCount as number) >= 1)
 })
 
 test('with nothing answered, the list covers every customer and message', async () => {
-  // Our own table only; the sample table `requests` is never written to.
-  await pool.query('DELETE FROM thread_claims')
+  // Our own tables only; the sample table `requests` is never written to.
+  await pool.query('DELETE FROM thread_claims; DELETE FROM topic_answers; DELETE FROM message_topics')
 
   const res = await fetch(`${base}/api/threads`)
   const body = (await res.json()) as { threads: { messageCount: number }[] }

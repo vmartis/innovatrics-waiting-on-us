@@ -28,6 +28,7 @@ test('a message carries exactly the fields the thread screen needs', () => {
 
   assert.deepEqual(Object.keys(only).sort(), [
     'answersId',
+    'assignedTo',
     'body',
     'channel',
     'contactName',
@@ -217,4 +218,38 @@ test('a kept link always points at a message further down the list', () => {
     if (message.answersId === null) continue
     assert.ok(timeline.findIndex((m) => m.id === message.answersId) > index)
   }
+})
+
+test('a message moved into a topic by hand stands in that topic block and says so', () => {
+  const timeline = toTimeline(
+    [
+      row({ id: 1, received_at: new Date('2026-10-01T09:00:00Z') }),
+      row({ id: 2, received_at: new Date('2026-10-02T09:00:00Z') }),
+      row({ id: 3, received_at: new Date('2026-10-03T09:00:00Z') }),
+    ],
+    new Map([[3, 1]]),
+  )
+
+  assert.deepEqual(
+    timeline.map((m) => m.id),
+    [3, 1, 2],
+  )
+  assert.equal(timeline[0].assignedTo, 1)
+  assert.equal(timeline[0].answersId, 1)
+  assert.equal(timeline[0].inReplyTo, null, 'the customer data is shown as it is')
+})
+
+test('a hand-made move never overrides a reply link the customer made', () => {
+  const timeline = toTimeline(
+    [
+      row({ id: 1, received_at: new Date('2026-10-01T09:00:00Z') }),
+      row({ id: 2, received_at: new Date('2026-10-02T09:00:00Z') }),
+      row({ id: 3, received_at: new Date('2026-10-03T09:00:00Z'), in_reply_to: 2 }),
+    ],
+    new Map([[3, 1]]),
+  )
+
+  const moved = timeline.find((m) => m.id === 3)
+  assert.equal(moved?.answersId, 2)
+  assert.equal(moved?.assignedTo, null)
 })

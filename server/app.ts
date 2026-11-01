@@ -3,6 +3,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { describe, errorStatus } from './errors.ts'
 import { claimsRouter } from './routes/claims.ts'
 import { threadsRouter } from './routes/threads.ts'
+import { topicsRouter } from './routes/topics.ts'
 import { TEAM } from '../lib/team.ts'
 
 /**
@@ -46,6 +47,7 @@ export function createApp(): Express {
     res.json({ team: TEAM })
   })
   app.use('/api/threads', claimsRouter)
+  app.use('/api/threads', topicsRouter)
   app.use('/api/threads', threadsRouter)
 
   // Anything else under /api is a mistake, not a page.
