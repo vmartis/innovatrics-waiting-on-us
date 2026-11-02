@@ -61,6 +61,45 @@ partícia = hash(userId) % počet_partícií
 - **Horúci kľúč (hot key):** jeden používateľ s extrémne veľa správami preťaží svoju partíciu. Pri notifikáciách je to malé riziko.
 - **Pridanie partícií neskôr** zmení výsledok `% N`. Časť používateľov sa presunie do inej partície a na chvíľu sa poruší poradie. Preto sa partície dávajú s rezervou hneď na začiatku.
 
+### Ako funguje consumer group (koľko workerov na partíciu)
+
+**V jednej group číta každú partíciu v danom momente práve jeden worker, ale jeden worker môže čítať viac partícií.** „Jeden worker na partíciu“ vyjde iba vtedy, keď je workerov rovnako ako partícií.
+
+| Workerov v group `sms` (60 partícií) | Čo dostane každý worker |
+|---|---|
+| 1 | všetkých 60 partícií |
+| 10 | po 6 partícií |
+| 60 | po 1 partícii (najväčší možný paralelizmus) |
+| 80 | 60 pracuje, **20 stojí** (len záloha) |
+
+```
+notifications.sms (60 partícií)
+  P0–P5   ─► sms worker 1
+  P6–P11  ─► sms worker 2
+  ...
+  P54–P59 ─► sms worker 10
+
+Tie isté partície číta znova a samostatne:
+  P0–P59  ─► group "audit" (vlastné workery, vlastný offset)
+```
+
+- **Pravidlo:** v jednej group nikdy nečítajú dva workery tú istú partíciu. Preto idú správy jedného používateľa v poradí.
+- **Rôzne groups sa neovplyvňujú.** Každá má vlastný **offset** pre každú partíciu („spracoval som po správu 1 234“). Audit preto sendery nespomaľuje.
+
+**Rebalance – keď worker pribudne alebo odíde:**
+- Jeden broker je **group coordinator**. Workery mu posielajú heartbeat („žijem“).
+- Keď worker pribudne (autoscaling), odíde (deploy) alebo spadne, coordinator rozdelí partície nanovo.
+- Nový worker pokračuje od posledného uloženého offsetu. Ak starý SMS poslal, ale spadol pred uložením offsetu, pošle sa znova → **at-least-once**, sender musí duplicity preskočiť podľa `notificationId`.
+- **Cooperative sticky assignor** presunie iba partície, ktoré treba. Ostatné workery bežia ďalej.
+
+**Worker vs. consumer:**
+- Worker = jedna inštancia (pod). V Spring Kafka dá `concurrency = 3` tri consumery na pod, každý je samostatný člen group.
+- Limit: **všetci consumeri v group spolu ≤ počet partícií**. Pri 60 partíciách a `concurrency = 3` má zmysel najviac 20 podov.
+
+**Keď ani jeden worker na partíciu nestačí:** brána odpovedá 100+ ms, posielať po jednej je pomalé. Worker môže posielať veľa požiadaviek naraz (neblokujúci HTTP klient), musí však držať poradie pre každého používateľa a offset uložiť až keď je hotové všetko pred ním. Presne toto robí **Confluent Parallel Consumer**.
+
+**Na pohovor:** „Každý kanál má vlastnú consumer group. Kafka dá každú partíciu práve jednému workeru v group, takže správy jedného používateľa idú v poradí. Workery škálujeme podľa consumer lagu, najviac do počtu partícií. Audit je samostatná group s vlastnými offsetmi.“
+
 ## Krok 3 – používatelia cez compacted topic
 
 ```
