@@ -194,6 +194,61 @@ workers ──► notification-status (SENT / FAILED / DELIVERED) ──┘
 - **Doručenie:** at-least-once (offset sa commitne až po odoslaní) + idempotencia cez `notificationId`. Exactly-once v Kafke platí len v rámci Kafky, nie pre externú SMS bránu.
 - Rate limit, circuit breaker (Resilience4j) a viac providerov zostávajú rovnaké.
 
+### Ako funguje retry topic
+
+**V skratke:** neúspešná správa sa presunie do samostatného topicu, kde počká a skúsi sa znova. Hlavný topic medzitým beží ďalej.
+
+**Problém:** v RabbitMQ sa neúspešná správa vráti do fronty (nack/requeue). V Kafke nie – partícia je log, worker ju číta v poradí. Opakovanie na mieste **zastaví celú partíciu** (*head-of-line blocking*). Pri 10M používateľoch a 60 partíciách by jedna zaseknutá SMS zdržala ~166 000 ľudí.
+
+```
+notifications.sms ─chyba─► sms-retry-1m ─chyba─► sms-retry-10m ─chyba─► sms-dlt
+      │ ok                    │ po 1 min            │ po 10 min             └─► alert, ručný replay
+      ▼                       ▼                     ▼
+   SMS brána               SMS brána             SMS brána
+```
+
+1. Worker zlyhá → správu **skopíruje** do `sms-retry-1m`, uloží offset v hlavnom topicu a ide ďalej.
+2. Retry consumer ju po 1 minúte skúsi znova. Pri ďalšej chybe ide do `sms-retry-10m`.
+3. Po poslednom pokuse ide do **DLT** (*dead-letter topic*). Automaticky ho nikto nespracúva: alert a po oprave ručný replay späť.
+
+- Do **hlavičiek** sa pridá pôvodný topic, partícia, offset, dôvod chyby a číslo pokusu. `notificationId` zostáva rovnaké, idempotencia platí aj pri opakovaní.
+
+**Ako sa čaká, keď Kafka nevie „odložiť“ správu:**
+- V hlavičke je čas, kedy sa má správa spracovať. Ak ešte nenastal, consumer **pozastaví partíciu** (`pause`), vráti sa na tú istú správu (`seek`) a po uplynutí času pokračuje (`resume`).
+- **Jeden topic na každé oneskorenie:** všetky správy v `retry-1m` majú rovnaké oneskorenie, sú teda zoradené podľa času, kedy prídu na rad. Keď prvá ešte nie je na rade, nie je ani žiadna ďalšia.
+
+**Spring Kafka to robí sám** (vytvorí topicy, hlavičky, pause/resume):
+
+```kotlin
+@RetryableTopic(
+    attempts = "3",                                          // 1 + 2 opakovania
+    backoff = Backoff(delay = 60_000, multiplier = 10.0),    // 1 min, 10 min
+    exclude = [InvalidPhoneNumberException::class],          // trvalá chyba → rovno DLT
+)
+@KafkaListener(topics = ["notifications.sms"], groupId = "sms")
+fun onSms(n: Notification) { ... }
+
+@DltHandler
+fun onDead(n: Notification) { /* stav FAILED do notification-status, alert */ }
+```
+
+**Ktoré chyby opakovať:**
+
+| Chyba | Príklad | Čo s ňou |
+|---|---|---|
+| **dočasná** | timeout, HTTP 5xx, 429 | retry topic |
+| **trvalá** | neplatné číslo, HTTP 400, nečitateľná správa | **rovno do DLT** |
+
+Pred retry topicom býva **krátke opakovanie na mieste** (napr. 3× po 200 ms cez `DefaultErrorHandler`). Vyrieši väčšinu drobných výpadkov bez presúvania.
+
+**Na čo si dať pozor:**
+- **Poradie sa poruší:** správa z retry predbehne neskoršie správy toho istého používateľa. Pri notifikáciách zvyčajne nevadí.
+- **Expirácia:** OTP platí 5 minút, poslať ho po 10 minútach nemá zmysel. Správa nesie `expiresAt`, po vypršaní sa neposiela, zapíše sa `EXPIRED`.
+- **Výpadok celej brány nie je úloha pre retry topic.** Inak by sa 1M správ/s len presúvalo z topicu do topicu. Otvorí sa **circuit breaker**: worker prestane čítať hlavný topic (`pause`), správy bezpečne čakajú v Kafke, rastie lag, prípadne sa prepne na bránu B. Retry topicy sú na **jednotlivé** zlyhania.
+- **Monitoring:** lag a počet správ v retry topicoch a v DLT. Rastúci DLT = alert.
+
+**Na pohovor:** „V Kafke nemôžem správu vrátiť do fronty bez zablokovania partície. Preto neblokujúci retry: `retry-1m`, `retry-10m`, nakoniec DLT s alertom, cez `@RetryableTopic` v Spring Kafka. Trvalé chyby idú rovno do DLT a pri výpadku celej brány zastavím čítanie circuit breakerom, nie retry topicmi.“
+
 ### At-least-once a idempotencia
 
 **V skratke:** at-least-once = žiadna notifikácia sa nestratí, ale môže prísť dvakrát. Idempotencia = druhé odoslanie sa zachytí a preskočí.
