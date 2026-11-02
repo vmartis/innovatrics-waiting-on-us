@@ -175,18 +175,101 @@ Zmena čísla:   User API ─► DB ─► topic users {123 → 0905 999 999} �
 
 ## Krok 5 – audit
 
+**V skratke:** audit je samostatný odberateľ, ktorý z Kafky zbiera všetky udalosti každej notifikácie (prijatá, odoslaná, zlyhala, doručená) a ukladá ich do úložiska. Sendery vôbec nespomaľuje.
+
+**Na čo slúži:**
+- **Podpora:** „Prišla používateľovi 123 včera OTP SMS?“
+- **Compliance a spory:** dôkaz, že notifikácia odišla, kedy a cez ktorú bránu.
+- **Štatistiky a fakturácia:** koľko SMS odišlo cez bránu A, koľko zlyhalo.
+
+Požiadavky: nespomaliť odosielanie, nič nestratiť, zachytiť aj notifikáciu, pri ktorej sender zlyhal, neukladať citlivý obsah.
+
 ```
-notifications.* ──► consumer group "audit" (Kafka Connect) ──► Postgres partície / S3
-workers ──► notification-status (SENT / FAILED / DELIVERED) ──┘
+                   ┌──────────────► sms worker ──► SMS brána ──callback──► Callback API
+Notification API ─►│ notifications.*      │                                    │
+  (RECEIVED)       │                      │ SENT / FAILED / EXPIRED            │ DELIVERED
+                   │                      ▼                                    ▼
+                   │              notification-status ◄────────────────────────┘
+                   │                      │
+                   └──────────┬───────────┘
+                              ▼
+                 Kafka Connect (consumer group "audit")
+                              │
+                ┌─────────────┴─────────────┐
+                ▼                           ▼
+        PostgreSQL (hot, 7–30 dní)     S3 Parquet + Athena (roky)
 ```
 
-- **Audit je ďalšia consumer group** na tých istých topicoch. Má vlastný offset, takže workery vôbec nespomaľuje. Toto je pri Kafke najväčšia výhoda: fan-out je zadarmo, netreba kopírovať správy do ďalšej fronty.
-- **Stavové udalosti:** workery zapisujú `SENT` / `FAILED` do topicu `notification-status`. `DELIVERED` príde cez callback brány.
-- **Kafka Connect** (hotový framework na prenos dát z/do Kafky, netreba písať vlastný consumer):
-  - **JDBC sink** do PostgreSQL s partíciami podľa dňa, pre 100k/s;
-  - **S3 sink** do Parquet súborov + dotazy cez Athena, pre 1M/s alebo dlhodobý archív.
-- **Hot audit:** samotný topic s retenciou je trvalý, prehrávateľný log. Keď sink vypadne, dočíta od posledného offsetu. Nič sa nestratí.
-- Záznam: `notificationId, userId, type, status, timestamp, provider, errorCode`. Bez obsahu správy a kontaktov.
+### Odkiaľ prichádzajú udalosti
+
+**1. `RECEIVED` – priamo z hlavných topicov**
+- Audit číta `notifications.sms/email/push` ako **vlastná consumer group** s vlastným offsetom, workery nespomaľuje. Pri Kafke najväčšia výhoda: fan-out je zadarmo, netreba kopírovať správy do ďalšej fronty.
+- **Prečo nie zápis do DB priamo z API:** API by čakalo na DB a vznikol by *dual write* – zápis do Kafky prejde, do DB nie (alebo naopak), záznamy sa rozídu.
+- **Prečo nie zápis zo senderov:** keď sender spadne alebo správu nikdy nespracuje, audit o nej nevie. Presne táto medzera bola v mojom riešení z pohovoru.
+
+**2. `SENT` / `FAILED` / `EXPIRED` – od workerov**
+- Po pokuse o odoslanie worker zapíše malú udalosť do topicu `notification-status`, kľúč `userId` – všetky stavy jednej notifikácie sú v jednej partícii, v poradí.
+- Napr. `{notificationId, userId, type, status: SENT, provider: "gw-A", providerMessageId, errorCode, timestamp}`.
+
+**3. `DELIVERED` – callback od brány**
+- SMS brána neskôr pošle **delivery report** (SMS prišla do telefónu) cez webhook na malú službu Callback API. Pri emaile z SES cez SNS.
+- Callback API to zapíše do `notification-status` ako `DELIVERED`.
+- Brána pozná len svoje ID, preto pri odoslaní posielame `notificationId` ako `clientReference` a brána ho v callbacku vráti. Inak treba uložiť mapovanie `providerMessageId → notificationId`.
+- Push (FCM/APNs) skutočné doručenie zvyčajne nepotvrdzuje, tam končíme na `SENT`.
+
+### Kafka Connect – kto to zapisuje
+
+- Hotový framework na presun dát medzi Kafkou a inými systémami. Samostatný cluster workerov, konektory sa len nakonfigurujú (JSON cez REST), **žiadny vlastný kód**.
+- **Sink konektor** je v skutočnosti consumer group: číta topicy, zbiera dávky, zapisuje naraz.
+- **Citlivé polia preč:** `notifications.*` obsahuje text správy. SMT (*single message transform*) `ReplaceField` vyhodí `text` a kontakty pred zápisom. Záznam: `notificationId, userId, type, status, timestamp, provider, errorCode`.
+- **Chybné správy:** `errors.tolerance=all` + vlastný DLQ topic konektora. Jedna poškodená správa nezastaví audit.
+
+### Kam sa to ukladá
+
+**PostgreSQL – hot audit pre podporu (7–30 dní)**
+
+Tabuľka **iba na pridávanie** (append-only), riadok na udalosť:
+
+```sql
+CREATE TABLE notification_audit (
+  notification_id uuid, user_id bigint, type text, status text,
+  provider text, error_code text, ts timestamptz,
+  PRIMARY KEY (notification_id, status, ts)
+) PARTITION BY RANGE (ts);      -- jedna partícia na deň
+```
+
+- **Partície podľa dňa:** staré dáta preč cez `DROP` partície, okamžite, bez pomalého `DELETE`.
+- **Udalosti, nie jeden riadok s posledným stavom:** insert je rýchlejší ako update, zostane história, nevadí poradie (`DELIVERED` môže prísť skôr ako `SENT`).
+- Dotaz podpory (index na `(user_id, ts)`):
+
+```sql
+SELECT status, provider, error_code, ts FROM notification_audit
+WHERE user_id = 123 AND ts > now() - interval '1 day' ORDER BY ts;
+```
+
+- **Limit:** 100k notifikácií/s ≈ 300k udalostí/s. Pre jeden PostgreSQL na hrane, potrebuje veľké dávky. Pri 1M/s nestačí.
+
+**S3 + Athena – dlhodobý archív (roky), aj pri 1M/s**
+- **S3 sink** píše **Parquet** (stĺpcový, dobre sa komprimuje) do priečinkov podľa času: `s3://audit/dt=2026-11-02/hour=10/…parquet`.
+- **Athena** nad tým spúšťa SQL a číta len priečinky daného dňa.
+- Lacné, bez limitu. Oneskorenie niekoľko minút (súbor sa zapíše po naplnení alebo po čase).
+- S3 lifecycle: po roku do Glacieru, po N rokoch zmazať.
+
+**Kombinácia:** PostgreSQL pre rýchle dotazy podpory, S3 pre všetko ostatné. Oba sinky čítajú tie isté topicy, každý ako vlastná group.
+
+### Spoľahlivosť
+
+- **Výpadok úložiska:** konektor stojí, rastie lag, dáta čakajú v Kafke. Po obnove pokračuje od posledného offsetu, sendery nič nepocítia. Retencia topicov musí byť dlhšia ako najdlhší očakávaný výpadok (napr. 3–7 dní).
+- **Duplikáty:** Connect je tiež at-least-once. JDBC sink v režime `upsert` s primárnym kľúčom zapíše udalosť raz. S3 sink vie exactly-once – súbory pomenúva podľa offsetov, opakovaný zápis prepíše ten istý súbor.
+- **Hot audit v Kafke:** `notification-status` s retenciou je trvalý, prehrateľný log. Audit sa dá prepočítať posunom offsetu späť.
+
+### Na čo si dať pozor
+
+- **Citlivé dáta:** nikdy text správy, telefón ani email. Len ID a stavy, uchovanie podľa pravidiel (GDPR).
+- **„Visiaca“ notifikácia:** má `RECEIVED`, ale bez `SENT`/`FAILED` dlhšie ako napr. 15 minút. Dobrý alert, odhalí stratu alebo zaseknutý kanál.
+- **Monitoring:** lag group `audit`, chyby a DLQ konektora.
+
+**Na pohovor:** „Audit je samostatná consumer group na hlavných topicoch, takže `RECEIVED` zachytí každú notifikáciu, aj keď sender zlyhá. Workery posielajú `SENT`/`FAILED` do `notification-status`, `DELIVERED` príde z callbacku brány. Kafka Connect to bez vlastného kódu zapisuje do PostgreSQL rozdeleného po dňoch pre podporu a do S3 v Parquet na archív, cez SMT vyhodí obsah správy. Keď úložisko vypadne, dáta čakajú v Kafke a sendery to nepocítia.“
 
 ## Krok 6 – spoľahlivosť (rozdiely oproti RabbitMQ)
 
