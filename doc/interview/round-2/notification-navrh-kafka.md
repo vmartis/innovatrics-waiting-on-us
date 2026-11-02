@@ -107,10 +107,58 @@ User API ─► PostgreSQL (zdroj pravdy)
    └─► topic "users" (cleanup.policy=compact, key=userId) ─► GlobalKTable / RocksDB v každom workeri
 ```
 
-- **Compacted topic** drží pre každý kľúč len **poslednú verziu**. Zmazanie používateľa je správa s prázdnou hodnotou (*tombstone*).
-- Worker si pri štarte prečíta celý topic a má úplnú lokálnu kópiu kontaktov. Potom už len dočítava zmeny. Nepotrebuje Hazelcast ani dotazy do DB.
-- **Kafka Streams GlobalKTable** to robí automaticky, dáta drží lokálne v RocksDB.
+**V skratke:** každý worker má na vlastnom disku úplnú kópiu kontaktov všetkých používateľov a Kafka ju udržiava aktuálnu. Kontakt nájde bez volania DB.
+
+**Problém:** správa nesie iba `userId`, worker potrebuje telefón / email / push token. Pri 1M správ/s by to bol 1M SELECTov za sekundu do PostgreSQL. Worker sa preto pýta iba vlastnej kópie.
+
+### Compacted topic `users` – odkiaľ dáta prichádzajú
+
+- Pri každej zmene používateľa ide do topicu správa s jeho aktuálnymi údajmi.
+- **Bežný topic** maže podľa času (napr. po 7 dňoch). Používateľ spred roka by zmizol, preto to nejde.
+- **Compacted topic** (`cleanup.policy=compact`) drží pre každý kľúč len **poslednú verziu**:
+
+| Pred kompakciou | Po kompakcii |
+|---|---|
+| 123 → tel. 0901 111 111 | |
+| 456 → tel. 0902 222 222 | 456 → tel. 0902 222 222 |
+| 123 → tel. 0905 999 999 | 123 → tel. 0905 999 999 |
+| 789 → null (zmazaný) | *(časom zmizne celý)* |
+
+- Topic je teda **tabuľka uložená ako log**: jeden riadok na používateľa, nikdy nevyprší.
+- **Zmazanie** je správa s prázdnou hodnotou (*tombstone*). Kafka ju po čase (`delete.retention.ms`) odstráni tiež. Dobré pre GDPR.
+- Veľkosť: 10M používateľov × ~500 B ≈ 5 GB. Pre Kafku malé.
 - Pre spoľahlivé publikovanie zmien z User API: **transactional outbox** (udalosť sa zapíše do tabuľky v tej istej DB transakcii, potom sa odošle do Kafky), prípadne **Debezium** (CDC, číta zmeny priamo z PostgreSQL WAL logu). Zápis do DB a do Kafky sa tak nerozíde.
+
+### GlobalKTable – ako sa topic dostane do workera
+
+- **KTable** (knižnica Kafka Streams) je pohľad na topic ako na tabuľku „kľúč → posledná hodnota“.
+- **Global** = každý worker dostane **všetky** partície topicu `users`, opak consumer group. Každý worker musí poznať každého používateľa.
+- **Pri štarte** prečíta topic od začiatku a naplní lokálnu tabuľku. Kým nie je hotový, notifikácie nespracúva. **Potom** už len priebežne dočítava zmeny.
+
+### RocksDB – kde kópia leží
+
+- Malá key-value databáza, ktorá beží **vnútri procesu workera** ako knižnica. Nie je to server, žiadne sieťové volanie.
+- Dáta sú na lokálnom disku, najčastejšie použité v pamäti. 5 GB nemusí byť celých v RAM.
+- Vyhľadanie v mikrosekundách (Hazelcast / DB cez sieť: milisekundy). Kafka Streams si RocksDB vytvorí a plní sama.
+
+### Ako to beží
+
+```
+Notifikácia:   notifications.sms {userId: 123} ─► worker: store.get(123) ─► 0905 999 999 ─► SMS brána
+Zmena čísla:   User API ─► DB ─► topic users {123 → 0905 999 999} ─► všetky workery prepíšu RocksDB
+```
+
+- Zmena dorazí ku všetkým workerom zvyčajne do sekundy. **Eventual consistency:** krátke okno, keď sa môže použiť staré číslo. Pri notifikáciách prijateľné.
+- **Reštart:** s trvalým diskom (persistent volume) RocksDB zostane a worker dočíta len zmeny od checkpointu. Bez neho číta celý topic znova (pri 5 GB minúty). Preto workery dostanú trvalý disk.
+
+### Na čo si dať pozor
+
+- **Prečo nie Hazelcast?** Žiadny ďalší cluster, žiadne sieťové volanie. Kafka je zdroj aj distribúcia zmien.
+- **Pamäť:** každý worker drží všetko. Pri 10M OK. Pri miliardách bežná **KTable**: `users` aj notifikácie s kľúčom `userId` a rovnakým počtom partícií (co-partitioning), každý worker drží len svojich používateľov.
+- **Externé volania z Kafka Streams** sú netypické. Čistejšie v dvoch krokoch: Streams aplikácia správu len **obohatí** o kontakt → `notifications.sms.enriched` → obyčajný Spring Kafka sender ju pošle.
+- **Alternatíva bez cache:** API doplní kontakt do správy už pri prijatí. Workery kontakty nepotrebujú, ale API musí čítať používateľa.
+
+**Na pohovor:** „Kontakty publikujem cez outbox do compacted topicu `users`, jedna aktuálna verzia na používateľa. Každý worker ho číta ako GlobalKTable a drží lokálnu kópiu v RocksDB. Vyhľadanie je lokálne v mikrosekundách, bez dotazov do DB, a zmeny sa šíria do sekundy.“
 
 ## Krok 4 – priepustnosť (strana 3)
 
