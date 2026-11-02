@@ -194,6 +194,66 @@ workers ──► notification-status (SENT / FAILED / DELIVERED) ──┘
 - **Doručenie:** at-least-once (offset sa commitne až po odoslaní) + idempotencia cez `notificationId`. Exactly-once v Kafke platí len v rámci Kafky, nie pre externú SMS bránu.
 - Rate limit, circuit breaker (Resilience4j) a viac providerov zostávajú rovnaké.
 
+### At-least-once a idempotencia
+
+**V skratke:** at-least-once = žiadna notifikácia sa nestratí, ale môže prísť dvakrát. Idempotencia = druhé odoslanie sa zachytí a preskočí.
+
+| Záruka | Čo znamená | Pre notifikácie |
+|---|---|---|
+| **at-most-once** | nikdy dvakrát, ale môže sa stratiť | zlé – stratená OTP SMS = používateľ sa neprihlási |
+| **at-least-once** | nikdy sa nestratí, ale môže prísť dvakrát | **toto sa volí** |
+| **exactly-once** | presne raz | s externou bránou sa nedá zaručiť |
+
+**Prečo nejde exactly-once:** worker pošle SMS na bránu a uloží offset do Kafky. Tieto dve veci nie sú v jednej transakcii. Keď worker spadne medzi nimi, Kafka nevie, že SMS odišla. Kafka transakcie pokryjú len „čítam z Kafky → píšem do Kafky“.
+
+**At-least-once v Kafke:**
+- **API (producer):** `acks=all` – potvrdí sa až keď zápis majú repliky v ISR (pri `min.insync.replicas=2` aspoň 2 brokery), až potom `202`. `enable.idempotence=true` – broker rozpozná opakovaný zápis toho istého producera (producer id + poradové číslo). Rieši len opakovanie v rámci Kafky.
+- **Worker (consumer):** `enable.auto.commit=false`, v Spring Kafka `AckMode.RECORD` alebo `MANUAL`. Poradie je kľúčové:
+  - poslať → uložiť offset = at-least-once (pri páde sa pošle znova);
+  - uložiť offset → poslať = at-most-once (pri páde sa stratí).
+
+**Odkiaľ sa berú duplikáty:**
+1. Klient nedostal `202` (timeout) a POST zopakuje.
+2. Worker spadol po odoslaní, pred uložením offsetu – po rebalance ju pošle nový worker.
+3. Rebalance: starý worker ešte dobieha, partíciu už má nový (zombie).
+4. Timeout brány: SMS odišla, odpoveď nie – worker ju pošle do retry topicu.
+
+**Implementácia idempotencie** (*idempotentné* = dvakrát spracované má rovnaký výsledok ako raz):
+
+1. **Jednoznačné ID od začiatku.** API pridelí `notificationId` (UUID), nesie sa cez všetky opakovania a retry topicy. Klient posiela hlavičku `Idempotency-Key`: rovnaký kľúč druhýkrát → API vráti tú istú odpoveď a do Kafky nič nezapíše (kľúč v Redise s TTL). Rieši duplikát 1.
+2. **Kontrola „už odoslané?“ vo workeri** – atomicky zapísať značku pred odoslaním, ak existuje, preskočiť:
+
+| Kde | Ako | Poznámka |
+|---|---|---|
+| Redis | `SET sent:{id} SENDING NX EX 86400` | jednoduché, rýchle, rieši aj zombie |
+| PostgreSQL | `INSERT … ON CONFLICT DO NOTHING` na unique `notification_id` | pri 1M/s priveľa zápisov |
+| Lokálny RocksDB (Kafka Streams state store) | `store.putIfAbsent(id)` | bez siete; funguje, lebo `key = userId` posiela notifikáciu vždy do tej istej partície k tomu istému workeru; zálohované do changelog topicu |
+
+   TTL značky dlhšie ako najdlhší retry (napr. 24 h).
+
+3. **Kód workera (Spring Kafka, zjednodušene):**
+
+```kotlin
+@KafkaListener(topics = ["notifications.sms"], groupId = "sms", concurrency = "3")
+fun onSms(n: Notification, ack: Acknowledgment) {
+    val first = redis.opsForValue().setIfAbsent("sent:${n.id}", "SENDING", Duration.ofHours(24))
+    if (first == false) { ack.acknowledge(); return }         // duplikát → preskočiť
+
+    val phone = contacts.get(n.userId)                         // RocksDB / GlobalKTable
+    smsGateway.send(phone, n.text, clientReference = n.id)     // ID ide aj bráne
+    redis.opsForValue().set("sent:${n.id}", "SENT", Duration.ofHours(24))
+    statusProducer.send("notification-status", n.userId, Status(n.id, SENT))
+    ack.acknowledge()                                          // offset až na konci
+}
+```
+
+   Pri jasnom odmietnutí bránou sa značka zmaže a správa ide do retry topicu (`@RetryableTopic`).
+
+4. **Medzera, ktorá zostáva (povedať otvorene):** pád po odoslaní a pred zápisom `SENT` nechá značku `SENDING` – nevieme, či SMS odišla. Riešenie: `notificationId` poslať bráne ako jej idempotency key / client reference. Ak to brána nevie, zriedkavý duplikát sa akceptuje – dve OTP SMS sú menší problém ako žiadna.
+5. **Idempotentní sú aj ďalší odberatelia:** audit a stavy robia upsert podľa `(notificationId, status)`.
+
+**Na pohovor:** „Volím at-least-once: offset ukladám až po odoslaní, nič sa nestratí. Duplikáty riešim idempotenciou: `notificationId` od API plus `Idempotency-Key` od klienta, vo workeri atomické `SET NX` pred odoslaním a ID posielam aj bráne. Exactly-once s externou bránou zaručiť nejde, zvyšné okno pokryje len idempotencia na strane brány.“
+
 ## Krok 7 – prevádzka
 
 - Kľúčová metrika je **consumer lag** pre každú group: koľko správ ešte čaká. Podľa neho sa škáluje aj alertuje.
