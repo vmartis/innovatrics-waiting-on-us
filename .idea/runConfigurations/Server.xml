@@ -1,0 +1,31 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Server" type="js.build_tools.npm">
+    <package-json value="$PROJECT_DIR$/package.json" />
+    <command value="run" />
+    <scripts>
+      <script value="start" />
+    </scripts>
+    <node-interpreter value="/opt/homebrew/opt/node@26/bin/node" />
+    <envs>
+      <env name="PATH" value="/opt/homebrew/opt/node@26/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" />
+      <env name="PGHOST" value="127.0.0.1" />
+      <env name="PGPORT" value="5433" />
+      <env name="PGUSER" value="postgres" />
+      <env name="HOST" value="127.0.0.1" />
+    </envs>
+    <method v="2">
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="Database" run_configuration_type="ShConfigurationType" />
+      <option name="NpmBeforeRunTask" enabled="true">
+        <package-json value="$PROJECT_DIR$/package.json" />
+        <command value="run" />
+        <scripts>
+          <script value="build" />
+        </scripts>
+        <node-interpreter value="/opt/homebrew/opt/node@26/bin/node" />
+        <envs>
+          <env name="PATH" value="/opt/homebrew/opt/node@26/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" />
+        </envs>
+      </option>
+    </method>
+  </configuration>
+</component>
